@@ -1,0 +1,154 @@
+library(keras)
+library(readr)
+library(dplyr)
+library(tensorflow)
+library(precrec)
+
+dataset <- read_csv("/home/marlon/mainfolder/marlon/USFQ/DataMining/10_FinalProject/proyectoFinal/Model_1/dataset/wdbc.data", 
+                    col_names = FALSE)
+dataset = dataset %>%
+    select(-1) %>%
+    rename("diagnosis" = X2)
+
+for(i in 2:ncol(dataset)){
+    dataset[i] =  (dataset[i] - min(dataset[i]))/ (max(dataset[i]) - min(dataset[i])) * (1-0) + 0
+}
+
+x_data = dataset[, 2:ncol(dataset)]
+y_data = dataset[, 1]
+
+y_data$diagnosis = as.factor(y_data$diagnosis)
+
+y_data$diagnosis = as.numeric(y_data$diagnosis) - 1 # M:1, B:0
+
+#PCA
+mean_x = colMeans(x_data)
+
+for(i in 1:nrow(x_data)){
+    x_data[i, ] = x_data[i, ] - mean_x
+}
+
+
+svd = svd(x_data)
+
+eigenValues = svd$d^2/ sum(svd$d^2)
+
+eigenVectors = svd$v
+
+variance = cumsum(eigenValues)/sum(eigenValues)
+
+k = NULL
+
+for(i in 1:length(variance)){
+    if(variance[i] >= 0.95){
+        k = i
+        print(k)
+        break
+    }
+}
+
+k_selected = eigenVectors[,1:k]
+
+proy_data = as.data.frame(as.matrix(x_data) %*% as.matrix(k_selected))
+
+all_data = cbind(y_data, proy_data)
+
+
+
+rand_data = all_data[sample(nrow(all_data)),]
+
+#Del csv sacar el mejor modelo
+
+folds = cut(seq(1, nrow(rand_data)), breaks = 10, labels = F)
+
+recall = c()
+accuracy = c()
+precision = c()
+auc = c()
+loss = c()
+pred_vector = rep(0, nrow(all_data))
+real_vector = rand_data$diagnosis
+history = c()
+
+for(i in 1:10){
+    test_index = which(folds == i, arr.ind = T)
+    
+    test_x = as.matrix(rand_data[test_index, 2:ncol(rand_data)])
+    test_y = as.matrix(rand_data[test_index, 1])
+    
+    train_x = as.matrix(rand_data[-test_index, 2:ncol(rand_data)])
+    train_y = as.matrix(rand_data[-test_index, 1])
+    
+    model = keras_model_sequential()
+    
+    model %>%
+        layer_dense(units = 100, activation = 'relu', input_shape = c(ncol(train_x))) %>%
+        layer_dense(units = 1, activation = 'sigmoid')
+    
+    model %>%
+        compile(loss = 'binary_crossentropy',
+                optimizer = optimizer_rmsprop(lr = 0.001),
+                metrics = c('accuracy', tf$keras$metrics$AUC(), tf$keras$metrics$Precision(), tf$keras$metrics$Recall()))
+    
+    mymodel = model %>%
+        fit(train_x,
+            train_y,
+            epochs = 100,
+            batch_size = 32,
+            validation_split = 0.2
+            
+        )
+    
+    eval = model %>%
+        evaluate(test_x,
+                 test_y)
+    
+    history = c(history, mymodel)
+    recall = c(recall, eval[5])
+    accuracy = c(accuracy, eval[2])
+    precision = c(precision, eval[4])
+    auc = c(auc, eval[3])
+    loss = c(loss, eval[1])
+    
+    prob = model %>%
+        predict(test_x)
+    
+    pred = ifelse(prob <= 0.5, 0, 1)
+    
+    pred_vector[test_index] = pred
+    
+}
+
+sprintf("Accuracy   Mean: %f   SD: %f", mean(accuracy), sd(accuracy))
+sprintf("Precision   Mean: %f   SD: %f", mean(precision), sd(precision))
+sprintf("Recall   Mean: %f   SD: %f", mean(recall), sd(recall))
+sprintf("AUC   Mean: %f   SD: %f", mean(auc), sd(auc))
+sprintf("Loss   Mean: %f   SD: %f", mean(loss), sd(loss))
+
+table(pred_vector, real_vector)
+
+precrec_obj <- evalmod(scores = pred_vector, labels = real_vector)
+plot(precrec_obj)
+precrec_obj
+
+#Grafica Loss
+
+data_loss = NULL
+data_loss_val = NULL
+
+for(i in seq(2, 20, by = 2)){
+    data_loss = rbind(data_loss, as.vector(history[i]$metrics$loss))
+    data_loss_val = rbind(data_loss_val, as.vector(history[i]$metrics$val_loss))
+}
+
+mean_loss = colMeans(data_loss)
+mean_loss_val = colMeans(data_loss_val)
+
+loss_data = data.frame(mean_loss, mean_loss_val)
+
+library(ggplot2)
+
+ggplot(loss_data) +
+    geom_line(aes(x = 1:nrow(loss_data), y = mean_loss), color = "blue") +
+    geom_line(aes(x =  1:nrow(loss_data), y = mean_loss_val), color = "green")+
+    xlab("Epochs") + ylab("Loss") + labs(title = "Loss")
